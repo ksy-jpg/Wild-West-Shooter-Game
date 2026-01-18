@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wild West AR Showdown</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background: #1a1a1a;
+            font-family: 'Courier New', Courier, monospace;
+            color: #f1dca7;
+        }
+
+        #game-container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        #input-video {
+            display: none; 
+        }
+
+        #game-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            padding: 20px;
+            box-sizing: border-box;
+            z-index: 10;
+        }
+
+        .stats {
+            display: flex;
+            justify-content: space-between;
+            font-size: 24px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.8);
+            background: rgba(62, 39, 35, 0.8);
+            padding: 10px 20px;
+            border-radius: 8px;
+            border: 3px solid #8b4513;
+        }
+
+        #message-box {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(46, 26, 23, 0.95);
+            padding: 30px;
+            border: 6px solid #8b4513;
+            border-radius: 15px;
+            text-align: center;
+            pointer-events: all;
+            max-width: 450px;
+            box-shadow: 0 0 50px rgba(0,0,0,0.5);
+        }
+
+        button {
+            background: #d84315;
+            color: white;
+            border: 2px solid #ffab91;
+            padding: 15px 30px;
+            font-size: 24px;
+            cursor: pointer;
+            border-radius: 5px;
+            margin-top: 20px;
+            font-family: 'Courier New', Courier, monospace;
+            font-weight: bold;
+            transition: all 0.2s;
+        }
+
+        button:hover {
+            background: #ff5722;
+            transform: scale(1.05);
+        }
+
+        .instruction {
+            margin-top: 15px;
+            font-size: 14px;
+            color: #d7ccc8;
+            line-height: 1.4;
+        }
+
+        #flash {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: white;
+            opacity: 0;
+            pointer-events: none;
+            z-index: 5;
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <video id="input-video"></video>
+    <canvas id="game-canvas"></canvas>
+    
+    <div id="flash"></div>
+
+    <div id="ui-layer">
+        <div class="stats">
+            <div>Bounty: $<span id="score-val">0</span></div>
+            <div>Ammo: ∞</div>
+        </div>
+        
+        <div id="message-box">
+            <h1 style="margin-top: 0; color: #ffab91;">DESERT SHOWDOWN</h1>
+            <p>Your camera tracks your index finger.</p>
+            <p><strong>SPACEBAR</strong> to Fire!</p>
+            <div class="instruction">
+                1. Make a gun shape with your hand.<br>
+                2. Aim at the <strong>Bandits (Red)</strong>.<br>
+                3. Do NOT hit <strong>Hostages (Blue)</strong>.<br>
+                <br>
+                <em>Targets pop up from behind the scenery!</em>
+            </div>
+            <button id="start-btn">MOUNT UP!</button>
+        </div>
+    </div>
+</div>
+
+<script>
+    const videoElement = document.getElementById('input-video');
+    const canvasElement = document.getElementById('game-canvas');
+    const canvasCtx = canvasElement.getContext('2d');
+    const scoreEl = document.getElementById('score-val');
+    const startBtn = document.getElementById('start-btn');
+    const messageBox = document.getElementById('message-box');
+    const flashEl = document.getElementById('flash');
+
+    let score = 0;
+    let gameActive = false;
+    let crosshair = { x: 0, y: 0 };
+    let targets = [];
+    const maxTargets = 3;
+    
+    const TARGET_SIZE = 120;
+    const SPAWN_RATE = 0.02;
+
+    const hands = new Hands({
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+    });
+
+    hands.setOptions({
+        maxNumHands: 1,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5
+    });
+
+    hands.onResults(onResults);
+
+    const camera = new Camera(videoElement, {
+        onFrame: async () => {
+            await hands.send({ image: videoElement });
+        },
+        width: 1280,
+        height: 720
+    });
+
+    // Define hideout locations for obstacles
+    const hideouts = [
+        { x: 150, y: 0, type: 'barrel' }, 
+        { x: -250, y: 0, type: 'barrel' }, 
+        { x: -160, y: -200, type: 'door' }, 
+        { x: 200, y: -200, type: 'door' }   
+    ];
+
+    function onResults(results) {
+        if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+            const landmarks = results.multiHandLandmarks[0];
+            const tip = landmarks[8]; 
+            crosshair.x = (1 - tip.x) * canvasElement.width;
+            crosshair.y = tip.y * canvasElement.height;
+        }
+        draw();
+    }
+
+    function draw() {
+        canvasCtx.save();
+        canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+        drawDesertBackground();
+
+        if (gameActive) {
+            updateTargets();
+            targets.forEach(drawTarget);
+            drawEnvironment();
+        }
+        
+        drawCrosshair();
+        canvasCtx.restore();
+    }
+
+    function drawDesertBackground() {
+        const w = canvasElement.width;
+        const h = canvasElement.height;
+
+        const skyGrad = canvasCtx.createLinearGradient(0, 0, 0, h);
+        skyGrad.addColorStop(0, '#ffb74d'); 
+        skyGrad.addColorStop(0.5, '#ffe0b2');
+        canvasCtx.fillStyle = skyGrad;
+        canvasCtx.fillRect(0, 0, w, h);
+
+        canvasCtx.fillStyle = '#fff9c4';
+        canvasCtx.beginPath();
+        canvasCtx.arc(w * 0.8, h * 0.2, 60, 0, Math.PI * 2);
+        canvasCtx.fill();
+
+        canvasCtx.fillStyle = '#8d6e63';
+        canvasCtx.beginPath();
+        canvasCtx.moveTo(0, h * 0.6);
+        canvasCtx.lineTo(w * 0.2, h * 0.45);
+        canvasCtx.lineTo(w * 0.4, h * 0.6);
+        canvasCtx.lineTo(w * 0.7, h * 0.35);
+        canvasCtx.lineTo(w, h * 0.6);
+        canvasCtx.lineTo(w, h);
+        canvasCtx.lineTo(0, h);
+        canvasCtx.fill();
+
+        canvasCtx.fillStyle = '#d7ccc8';
+        canvasCtx.fillRect(0, h * 0.6, w, h * 0.4);
+        
+        canvasCtx.fillStyle = '#bcaaa4';
+        for(let i=0; i<20; i++) {
+            canvasCtx.beginPath();
+            canvasCtx.ellipse((i*w/15)%w, h*0.7 + (i*20)%200, 20, 5, 0, 0, Math.PI*2);
+            canvasCtx.fill();
+        }
+    }
+
+    function spawnTarget() {
+        if (targets.length < maxTargets && Math.random() < SPAWN_RATE) {
+            const isBandit = Math.random() > 0.3;
+            const hideout = hideouts[Math.floor(Math.random() * hideouts.length)];
+            
+            let spawnX, spawnY;
+            if (hideout.x < 0) {
+                spawnX = canvasElement.width + hideout.x;
+            } else {
+                spawnX = hideout.x;
+            }
+            // Spawn base is slightly above ground to ensure they can rise above barrel tops
+            spawnY = canvasElement.height - 180 + hideout.y;
+
+            const target = {
+                id: Date.now(),
+                x: spawnX,
+                y: spawnY,
+                width: 100,
+                height: 120,
+                type: isBandit ? 'bandit' : 'hostage',
+                life: 140 + Math.random() * 80, 
+                offset: 140, // Start fully submerged
+                maxRise: -40, // Allow rising slightly "above" the target Y for full visibility
+                state: 'rising'
+            };
+            targets.push(target);
+        }
+    }
+
+    function updateTargets() {
+        spawnTarget();
+
+        for (let i = targets.length - 1; i >= 0; i--) {
+            const t = targets[i];
+            
+            if (t.state === 'rising') {
+                t.offset -= 7;
+                if (t.offset <= t.maxRise) {
+                    t.offset = t.maxRise;
+                    t.state = 'staying';
+                }
+            } else if (t.state === 'staying') {
+                t.life--;
+                if (t.life <= 0) t.state = 'falling';
+            } else if (t.state === 'falling') {
+                t.offset += 10;
+                if (t.offset >= 140) {
+                    targets.splice(i, 1);
+                }
+            }
+        }
+    }
+
+    function drawEnvironment() {
+        const w = canvasElement.width;
+        const h = canvasElement.height;
+
+        drawBarrel(150, h - 150);
+        drawBarrel(w - 250, h - 150);
+
+        canvasCtx.fillStyle = '#5d4037';
+        canvasCtx.fillRect(w/2 - 200, h - 450, 40, 450);
+        canvasCtx.fillRect(w/2 + 160, h - 450, 40, 450);
+        canvasCtx.fillRect(w/2 - 220, h - 480, 440, 60);
+        canvasCtx.fillStyle = '#3e2723';
+        canvasCtx.font = "bold 30px 'Courier New'";
+        canvasCtx.textAlign = "center";
+        canvasCtx.fillText("SALOON", w/2, h - 440);
+    }
+
+    function drawBarrel(x, y) {
+        canvasCtx.save();
+        canvasCtx.fillStyle = '#4e342e';
+        canvasCtx.beginPath();
+        canvasCtx.ellipse(x + 50, y + 60, 55, 90, 0, 0, Math.PI * 2);
+        canvasCtx.fill();
+        
+        canvasCtx.strokeStyle = '#212121';
+        canvasCtx.lineWidth = 5;
+        canvasCtx.beginPath();
+        canvasCtx.moveTo(x - 5, y + 30);
+        canvasCtx.lineTo(x + 105, y + 30);
+        canvasCtx.moveTo(x - 5, y + 90);
+        canvasCtx.lineTo(x + 105, y + 90);
+        canvasCtx.stroke();
+        
+        canvasCtx.fillStyle = '#3e2723';
+        canvasCtx.beginPath();
+        canvasCtx.ellipse(x + 50, y - 20, 55, 20, 0, 0, Math.PI * 2);
+        canvasCtx.fill();
+        canvasCtx.stroke();
+        canvasCtx.restore();
+    }
+
+    function drawTarget(t) {
+        canvasCtx.save();
+        const drawY = t.y + t.offset;
+
+        if (t.type === 'bandit') {
+            canvasCtx.fillStyle = '#c62828';
+            canvasCtx.fillRect(t.x, drawY - 20, 100, 15);
+            canvasCtx.fillRect(t.x + 20, drawY - 40, 60, 25);
+            canvasCtx.fillStyle = '#ffccbc';
+            canvasCtx.fillRect(t.x + 25, drawY - 10, 50, 50);
+            canvasCtx.fillStyle = 'black';
+            canvasCtx.fillRect(t.x + 25, drawY + 5, 50, 15);
+            canvasCtx.fillStyle = '#c62828';
+            canvasCtx.fillRect(t.x + 10, drawY + 40, 80, 80);
+        } else {
+            canvasCtx.fillStyle = '#ffccbc';
+            canvasCtx.fillRect(t.x + 25, drawY - 10, 50, 50);
+            canvasCtx.fillStyle = 'black';
+            canvasCtx.fillRect(t.x + 35, drawY + 5, 5, 5);
+            canvasCtx.fillRect(t.x + 60, drawY + 5, 5, 5);
+            canvasCtx.fillStyle = '#ffccbc';
+            canvasCtx.fillRect(t.x + 5, drawY - 30, 15, 60);
+            canvasCtx.fillRect(t.x + 80, drawY - 30, 15, 60);
+            canvasCtx.fillStyle = '#1565c0';
+            canvasCtx.fillRect(t.x + 10, drawY + 40, 80, 80);
+        }
+        canvasCtx.restore();
+    }
+
+    function drawCrosshair() {
+        canvasCtx.save();
+        canvasCtx.strokeStyle = 'rgba(255, 0, 0, 0.9)';
+        canvasCtx.lineWidth = 3;
+        const x = crosshair.x;
+        const y = crosshair.y;
+        const size = 25;
+        canvasCtx.beginPath();
+        canvasCtx.arc(x, y, size, 0, Math.PI * 2);
+        canvasCtx.stroke();
+        canvasCtx.beginPath();
+        canvasCtx.moveTo(x - size - 10, y);
+        canvasCtx.lineTo(x + size + 10, y);
+        canvasCtx.moveTo(x, y - size - 10);
+        canvasCtx.lineTo(x, y + size + 10);
+        canvasCtx.stroke();
+        canvasCtx.fillStyle = 'red';
+        canvasCtx.beginPath();
+        canvasCtx.arc(x, y, 3, 0, Math.PI * 2);
+        canvasCtx.fill();
+        canvasCtx.restore();
+    }
+
+    function fire() {
+        if (!gameActive) return;
+
+        flashEl.style.opacity = '0.5';
+        setTimeout(() => flashEl.style.opacity = '0', 50);
+
+        for (let i = targets.length - 1; i >= 0; i--) {
+            const t = targets[i];
+            
+            // hitbox check: check against the current animated position (drawY)
+            const drawY = t.y + t.offset;
+            const top = drawY - 40;
+            const bottom = drawY + 120;
+            const left = t.x;
+            const right = t.x + 100;
+
+            // Higher offset means target is deeper behind object. 
+            // We allow hitting them as long as the head/shoulders are visible (offset < 100)
+            const isVisibleEnough = t.offset < 100;
+            const hitX = crosshair.x > left && crosshair.x < right;
+            const hitY = crosshair.y > top && crosshair.y < bottom;
+
+            if (isVisibleEnough && hitX && hitY) {
+                if (t.type === 'bandit') {
+                    score += 100;
+                } else {
+                    score = Math.max(0, score - 500);
+                }
+                scoreEl.innerText = score;
+                targets.splice(i, 1);
+                break; 
+            }
+        }
+    }
+
+    window.addEventListener('keydown', (e) => {
+        if (e.code === 'Space') {
+            fire();
+            e.preventDefault();
+        }
+    });
+
+    startBtn.addEventListener('click', () => {
+        messageBox.style.display = 'none';
+        score = 0;
+        scoreEl.innerText = score;
+        gameActive = true;
+        canvasElement.width = window.innerWidth;
+        canvasElement.height = window.innerHeight;
+    });
+
+    window.onload = () => {
+        camera.start().catch(err => {
+            console.error("Camera failed:", err);
+            messageBox.innerHTML = "<h1>Error</h1><p>Camera access required for finger tracking.</p>";
+        });
+    };
+
+    window.addEventListener('resize', () => {
+        canvasElement.width = window.innerWidth;
+        canvasElement.height = window.innerHeight;
+    });
+</script>
+
+</body>
+</html>
